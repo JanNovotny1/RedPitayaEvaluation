@@ -15,7 +15,7 @@ as a test bench for the capacitive nanosensor's 1 MHz excitation and lock-in det
 
 ```powershell
 cd C:\Users\jnovotny\Documents\RedPitayaEvaluation
-.\setup_env.ps1            # Python 3.12 by default; -PythonVersion 3.11 to change
+.\setup_env.ps1            # Python 3.13 by default; -PythonVersion / -PythonExe to change
 .\.venv\Scripts\Activate.ps1
 ```
 
