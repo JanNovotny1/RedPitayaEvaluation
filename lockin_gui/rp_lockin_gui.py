@@ -158,12 +158,16 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.zoom_cluster = QtWidgets.QCheckBox("Phasor: zoom to cloud")
         self.zoom_cluster.setChecked(True)
         self.zoom_cluster.toggled.connect(self._reset_phasor_range)
+        self.units = QtWidgets.QComboBox()
+        self.units.addItems(["V rms", "V pk"])
+        self.units.currentTextChanged.connect(self._units_changed)
         self.follow = QtWidgets.QCheckBox("Follow newest data")
         self.follow.setChecked(True)
         self.follow.toggled.connect(lambda on: on and self._reset_view())
         f.addRow("Output rate", self.rate)
         f.addRow("Display window", self.window)
         f.addRow("Scope sampling", self.dec_label)
+        f.addRow("Amplitude units", self.units)
         f.addRow(self.zoom_cluster)
         f.addRow(self.follow)
         pl.addWidget(g)
@@ -208,18 +212,16 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.p_iq.addLegend(offset=(10, 5))
         self.c_i = self.p_iq.plot(pen=pg.mkPen("#1f77b4", width=1), name="I")
         self.c_q = self.p_iq.plot(pen=pg.mkPen("#ff7f0e", width=1), name="Q")
-        self.p_r = self.gl.addPlot(row=1, col=0, title="Amplitude R at input (V pk, calibrated)")
+        self.p_r = self.gl.addPlot(row=1, col=0, title="Amplitude R at input (V rms)")
         self.c_r = self.p_r.plot(pen=pg.mkPen("#2ca02c", width=1))
         self.p_ph = self.gl.addPlot(row=2, col=0, title="Phase (deg)")
         self.c_ph = self.p_ph.plot(pen=pg.mkPen("#d62728", width=1))
         for p in (self.p_iq, self.p_r, self.p_ph):
             p.showGrid(x=True, y=True, alpha=0.3)
             p.setLabel("bottom", "time", units="s")
-            p.setClipToView(True)
             p.setDownsampling(auto=True, mode="peak")
-            p.setAutoVisible(y=True)            # y auto-range uses only the visible x window
-            p.enableAutoRange(axis="y")
-            p.disableAutoRange(axis="x")        # x is driven by the Follow logic
+            p.disableAutoRange()                # ranges are set explicitly in _update_plots
+            p.getViewBox().setFlag(p.getViewBox().GraphicsItemFlag.ItemClipsChildrenToShape, True)
         self.p_r.setXLink(self.p_iq)
         self.p_ph.setXLink(self.p_iq)
         self.p_sc = self.gl.addPlot(row=0, col=1, rowspan=3, title="Phasor I/Q (last 2000 points)")
@@ -362,16 +364,23 @@ class LockinWindow(QtWidgets.QMainWindow):
         zr = self._rotated(self.buf.z)
         qf = self.qf.value()
         k = self.iqgain.value()
+        to_unit = 1 / np.sqrt(2) if self.units.currentText() == "V rms" else 1.0
+        r_all = iq_to_volts(zr, qf, k) * to_unit
+        ph_all = np.degrees(np.angle(zr))
         self.c_i.setData(t, zr.real)
         self.c_q.setData(t, zr.imag)
-        self.c_r.setData(t, iq_to_volts(zr, qf, k))
-        self.c_ph.setData(t, np.degrees(np.angle(zr)))
+        self.c_r.setData(t, r_all)
+        self.c_ph.setData(t, ph_all)
+        if self.follow.isChecked():
+            t1 = t[-1]
+            t0 = max(t1 - self.window.value(), t[0])
+            vis = t >= t0
+            self.p_iq.setRange(xRange=(t0, t1), yRange=self._yrange(zr.real[vis], zr.imag[vis]), padding=0)
+            self.p_r.setRange(xRange=(t0, t1), yRange=self._yrange(r_all[vis]), padding=0)
+            self.p_ph.setRange(xRange=(t0, t1), yRange=self._yrange(ph_all[vis]), padding=0)
         tail = zr[-SCATTER_POINTS:]
         self.sc.setData(tail.real, tail.imag)
         self._update_phasor_range(tail)
-        if self.follow.isChecked():
-            t1 = t[-1]
-            self.p_iq.setXRange(max(t1 - self.window.value(), t[0]), t1, padding=0.01)
 
         n1 = int(self.binner.rate)                   # last 1 s
         z1 = zr[-n1:]
@@ -384,8 +393,8 @@ class LockinWindow(QtWidgets.QMainWindow):
             "Last 1 s ({} pts)\n"
             "I     = {:+.6f}  sd {:.2e}\n"
             "Q     = {:+.6f}  sd {:.2e}\n"
-            "R     = {:.6f} V  sd {:.2e} V\n"
-            "      = {:.1f} ppm rms\n"
+            "R     = {:.6f} V pk  ({:.6f} V rms)\n"
+            "R sd  = {:.2e} V pk = {:.1f} ppm\n"
             "phase = {:+.4f} deg  sd {:.2f} mdeg\n"
             "rotation (SW) = {:+.3f} deg\n"
             "max |I|,|Q| raw = {:.3f}{}\n\n"
@@ -394,11 +403,28 @@ class LockinWindow(QtWidgets.QMainWindow):
             "buffer overruns = {}\n"
             "recording       = {}".format(
                 z1.size, z1.real.mean(), z1.real.std(), z1.imag.mean(), z1.imag.std(),
-                r.mean(), r.std(), r.std() / max(r.mean(), 1e-15) * 1e6,
+                r.mean(), r.mean() / np.sqrt(2), r.std(), r.std() / max(r.mean(), 1e-15) * 1e6,
                 ph.mean(), ph.std() * 1e3, np.degrees(self.rotation), raw_max, warn,
                 self.samples_in / max(elapsed, 1e-9), int(self.binner.n * self.binner.rate / self.binner.fs),
                 self.backend.overruns,
                 f"{self.rec_rows} rows" if self.rec_writer else "off"))
+
+    @staticmethod
+    def _yrange(*arrays):
+        """min/max of the visible data with 8 % margin; a minimum span so flat noise-free
+        traces don't collapse to zero height."""
+        v = np.concatenate([np.asarray(a, dtype=float).ravel() for a in arrays])
+        v = v[np.isfinite(v)]
+        if v.size == 0:
+            return (-1, 1)
+        lo, hi = float(v.min()), float(v.max())
+        span = max(hi - lo, 1e-9, abs(hi) * 1e-6)
+        mid = 0.5 * (lo + hi)
+        return (mid - 0.54 * span, mid + 0.54 * span)
+
+    def _units_changed(self, text):
+        self.p_r.setTitle(f"Amplitude R at input ({text})")
+        self._update_plots()
 
     def _update_phasor_range(self, tail):
         """Change the phasor view only when needed (hysteresis), so it doesn't wobble."""
@@ -425,8 +451,6 @@ class LockinWindow(QtWidgets.QMainWindow):
         if not self.follow.isChecked():
             self.follow.setChecked(True)      # re-enters here via the toggled signal
             return
-        for p in (self.p_iq, self.p_r, self.p_ph):
-            p.enableAutoRange(axis="y")
         self._reset_phasor_range()
 
     def _clear_plots(self):
@@ -463,9 +487,9 @@ class LockinWindow(QtWidgets.QMainWindow):
             self.rec_file.write(f"# output rate: {self.rate.value()} Hz; software rotation at start: "
                                 f"{np.degrees(self.rotation):.4f} deg\n")
             self.rec_file.write("# I_raw/Q_raw: IQ module units; I_rot/Q_rot: after software rotation; "
-                                f"R_V: |IQ|/(iq_gain*quadrature_factor), iq_gain={self.iqgain.value():.4f}; rot_deg: software rotation in effect\n")
+                                f"R_Vpk: |IQ|/(iq_gain*quadrature_factor), iq_gain={self.iqgain.value():.4f}; R_Vrms = R_Vpk/sqrt(2); rot_deg: software rotation in effect\n")
             self.rec_writer = csv.writer(self.rec_file)
-            self.rec_writer.writerow(["t_s", "I_raw", "Q_raw", "I_rot", "Q_rot", "R_V", "phase_deg", "rot_deg"])
+            self.rec_writer.writerow(["t_s", "I_raw", "Q_raw", "I_rot", "Q_rot", "R_Vpk", "R_Vrms", "phase_deg", "rot_deg"])
             self.rec_rows = 0
             self.btn_rec.setText("Stop recording")
         else:
@@ -481,7 +505,7 @@ class LockinWindow(QtWidgets.QMainWindow):
         ph = np.degrees(np.angle(zr))
         rot = f"{np.degrees(self.rotation):.5f}"
         self.rec_writer.writerows(
-            (f"{a:.6f}", f"{b:.7e}", f"{c:.7e}", f"{d:.7e}", f"{e:.7e}", f"{g:.7e}", f"{h:.5f}", rot)
+            (f"{a:.6f}", f"{b:.7e}", f"{c:.7e}", f"{d:.7e}", f"{e:.7e}", f"{g:.7e}", f"{g / np.sqrt(2):.7e}", f"{h:.5f}", rot)
             for a, b, c, d, e, g, h in zip(t, z.real, z.imag, zr.real, zr.imag, r, ph))
         self.rec_rows += t.size
 
