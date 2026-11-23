@@ -31,8 +31,8 @@ APP = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 
 import pyqtgraph as pg  # noqa: E402
 
-from backends import (LockinSettings, PyrplLockin, SimLockin,  # noqa: E402
-                      choose_decimation, iq_to_volts)
+from backends import (IQ_GAIN_DEFAULT, LockinSettings, PyrplLockin,  # noqa: E402
+                      SimLockin, choose_decimation, iq_to_volts)
 from binning import Binner  # noqa: E402
 
 POLL_MS = 50
@@ -111,7 +111,9 @@ class LockinWindow(QtWidgets.QMainWindow):
         g = QtWidgets.QGroupBox("Excitation")
         f = QtWidgets.QFormLayout(g)
         self.freq = self._dspin(0, 62.5e6, 1e6, 3, " Hz", 1000)
-        self.amp = self._dspin(0, 1.0, 0.5, 4, " V", 0.01)
+        self.amp = self._dspin(0, 1.0, 0.25, 4, " V", 0.01)
+        self.amp.setToolTip("PyRPL amplitude (into 50 ohm). A direct cable into IN1 (1 MOhm)\n"
+                            "sees about twice this: keep <= 0.35 V with LV jumpers (+-1 V range).")
         self.out = QtWidgets.QComboBox()
         self.out.addItems(["out1", "out2", "off"])
         f.addRow("Frequency", self.freq)
@@ -139,6 +141,10 @@ class LockinWindow(QtWidgets.QMainWindow):
         f.addRow("Filter order", self.order)
         f.addRow("AC coupling", self.acbw)
         f.addRow("Quadrature factor", self.qf)
+        self.iqgain = self._dspin(0.01, 10, IQ_GAIN_DEFAULT, 4, "", 0.01)
+        self.iqgain.setToolTip("Calibration: |I+jQ| per volt of input amplitude at quadrature factor 1.\n"
+                               "Measured 0.41 on this board; tools/pyrpl_diag.py prints it.")
+        f.addRow("IQ gain (cal.)", self.iqgain)
         pl.addWidget(g)
 
         # readout
@@ -194,7 +200,7 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.p_iq.addLegend(offset=(10, 5))
         self.c_i = self.p_iq.plot(pen=pg.mkPen("#1f77b4", width=1), name="I")
         self.c_q = self.p_iq.plot(pen=pg.mkPen("#ff7f0e", width=1), name="Q")
-        self.p_r = self.gl.addPlot(row=1, col=0, title="Amplitude R (estimated V pk)")
+        self.p_r = self.gl.addPlot(row=1, col=0, title="Amplitude R at input (V pk, calibrated)")
         self.c_r = self.p_r.plot(pen=pg.mkPen("#2ca02c", width=1))
         self.p_ph = self.gl.addPlot(row=2, col=0, title="Phase (deg)")
         self.c_ph = self.p_ph.plot(pen=pg.mkPen("#d62728", width=1))
@@ -342,9 +348,10 @@ class LockinWindow(QtWidgets.QMainWindow):
         t = self.buf.t
         zr = self._rotated(self.buf.z)
         qf = self.qf.value()
+        k = self.iqgain.value()
         self.c_i.setData(t, zr.real)
         self.c_q.setData(t, zr.imag)
-        self.c_r.setData(t, iq_to_volts(zr, qf))
+        self.c_r.setData(t, iq_to_volts(zr, qf, k))
         self.c_ph.setData(t, np.degrees(np.angle(zr)))
         tail = zr[-SCATTER_POINTS:]
         self.sc.setData(tail.real, tail.imag)
@@ -359,7 +366,7 @@ class LockinWindow(QtWidgets.QMainWindow):
 
         n1 = int(self.binner.rate)                   # last 1 s
         z1 = zr[-n1:]
-        r = iq_to_volts(z1, qf)
+        r = iq_to_volts(z1, qf, k)
         ph = np.degrees(np.angle(z1))
         elapsed = time.perf_counter() - self.t_stream0
         raw_max = max(np.abs(self.buf.z[-n1:].real).max(), np.abs(self.buf.z[-n1:].imag).max())
@@ -414,7 +421,7 @@ class LockinWindow(QtWidgets.QMainWindow):
             self.rec_file.write(f"# output rate: {self.rate.value()} Hz; software rotation at start: "
                                 f"{np.degrees(self.rotation):.4f} deg\n")
             self.rec_file.write("# I_raw/Q_raw: IQ module units; I_rot/Q_rot: after software rotation; "
-                                "R_V: 2*|IQ|/quadrature_factor (estimate); rot_deg: software rotation in effect\n")
+                                f"R_V: |IQ|/(iq_gain*quadrature_factor), iq_gain={self.iqgain.value():.4f}; rot_deg: software rotation in effect\n")
             self.rec_writer = csv.writer(self.rec_file)
             self.rec_writer.writerow(["t_s", "I_raw", "Q_raw", "I_rot", "Q_rot", "R_V", "phase_deg", "rot_deg"])
             self.rec_rows = 0
@@ -428,7 +435,7 @@ class LockinWindow(QtWidgets.QMainWindow):
 
     def _write_rows(self, t, z):
         zr = self._rotated(z)
-        r = iq_to_volts(z, self.qf.value())
+        r = iq_to_volts(z, self.qf.value(), self.iqgain.value())
         ph = np.degrees(np.angle(zr))
         rot = f"{np.degrees(self.rotation):.5f}"
         self.rec_writer.writerows(

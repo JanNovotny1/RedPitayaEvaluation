@@ -6,8 +6,10 @@ outputs, the real input amplitude at IN1 (raw scope, 125 MS/s), the matching
 |I+jQ| from iq2, and the residual 1 MHz signal on IN1 with the excitation off.
 
 Usage (SCPI server and web apps stopped, OUT1 -> IN1 cable connected):
-    python tools\\pyrpl_diag.py 169.254.101.38
+    python tools\\pyrpl_diag.py 169.254.101.38 [--amp 0.2]
+Keep --amp <= 0.35 V with LV jumpers: a 1 MOhm input sees about twice the PyRPL amplitude.
 """
+import argparse
 import sys
 import time
 
@@ -17,9 +19,12 @@ from qtpy import QtWidgets
 APP = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 from pyrpl import Pyrpl  # noqa: E402
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else "169.254.101.38"
-F = 1e6
-AMP = 0.5
+ap = argparse.ArgumentParser()
+ap.add_argument("host", nargs="?", default="169.254.101.38")
+ap.add_argument("--amp", type=float, default=0.2, help="PyRPL excitation amplitude [V]")
+ap.add_argument("--freq", type=float, default=1e6)
+args = ap.parse_args()
+HOST, F, AMP = args.host, args.freq, args.amp
 
 
 def section(title):
@@ -80,7 +85,7 @@ for name in ("asg0", "asg1", "iq0", "iq1", "iq2", "pid0", "pid1", "pid2"):
     except Exception as e:
         print(f"{name:5s} ?: {e}")
 
-section("3. Set iq2 like the GUI: 1 MHz, 0.5 V, out1/in1, LPF 500 Hz x2, AC 10 kHz")
+section(f"3. Set iq2 like the GUI: {F/1e6:g} MHz, {AMP} V, out1/in1, LPF 500 Hz x2, AC 10 kHz")
 for name in ("asg0", "asg1", "iq0", "iq1"):
     try:
         getattr(r, name).output_direct = "off"
@@ -102,14 +107,30 @@ print(f"IN1 tone             : {a_in:.4f} V pk   (IN1 min/max {x1.min():+.3f}/{x
 i_tr, q_tr, fs2 = scope_trace(r, "iq2", "iq2_2", 8192)
 zi = i_tr + 1j * q_tr
 print(f"iq2 at 15.26 kS/s    : |I+jQ| = {np.abs(zi).mean():.5f}, I = {i_tr.mean():+.5f}, Q = {q_tr.mean():+.5f}")
+clipped = max(abs(x1.min()), abs(x1.max())) > 0.97
+if clipped:
+    print("WARNING: IN1 reaches the +-1 V limit -> clipping, lower --amp")
 if a_in > 0:
-    print(f"ratio |I+jQ| / A_in  = {np.abs(zi).mean() / a_in:.4f}   (GUI assumes 0.5 x qf)")
-r_rel = np.abs(zi) / np.abs(zi).mean()
-print(f"|I+jQ| ripple over 1.07 s: {np.ptp(r_rel)*100:.2f} % peak-peak")
-spec = np.abs(np.fft.rfft(np.abs(zi) - np.abs(zi).mean()))
-fr = np.fft.rfftfreq(len(zi), 1 / fs2)
-k = np.argmax(spec[1:]) + 1
-print(f"largest ripple component: {fr[k]:.2f} Hz")
+    print(f"IQ gain = |I+jQ| / A_in = {np.abs(zi).mean() / a_in:.4f}   "
+          f"(enter this as 'IQ gain (cal.)' in the GUI)")
+    print(f"IN1 / OUT1 amplitude    = {a_in / max(a_out, 1e-12):.3f}   (2.0 expected for a 1 MOhm input)")
+
+section("4b. Ripple of |I+jQ| and phase over 8.6 s (decimation 65536, 1.9 kS/s)")
+i_tr, q_tr, fs3 = scope_trace(r, "iq2", "iq2_2", 65536)
+zi = i_tr + 1j * q_tr
+mag = np.abs(zi)
+ph = np.unwrap(np.angle(zi))
+print(f"|I+jQ| mean {mag.mean():.5f}, sd {mag.std()/mag.mean()*1e6:.0f} ppm, "
+      f"peak-peak {np.ptp(mag)/mag.mean()*100:.3f} %")
+print(f"phase  sd {np.degrees(ph.std())*1e3:.1f} mdeg, peak-peak {np.degrees(np.ptp(ph)):.3f} deg")
+win = np.hanning(len(mag))
+spec = np.abs(np.fft.rfft((mag - mag.mean()) * win)) * 4 / len(mag)
+fr = np.fft.rfftfreq(len(mag), 1 / fs3)
+sel = fr > 0.3
+top = np.argsort(np.where(sel, spec, 0))[-5:][::-1]
+print("strongest ripple components in |I+jQ|:")
+for kk in top:
+    print(f"   {fr[kk]:8.3f} Hz   {spec[kk]/mag.mean()*1e6:8.0f} ppm of |I+jQ|")
 
 section("5. Excitation OFF: anything still at 1 MHz on IN1? (pickup / other sources)")
 iq.amplitude = 0

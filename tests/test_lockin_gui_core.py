@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lockin_gui"))
 
-from backends import SimLockin, choose_decimation  # noqa: E402
+from backends import IQ_GAIN_DEFAULT, SimLockin, choose_decimation  # noqa: E402
 from binning import Binner  # noqa: E402
 
 FS_1K = 125e6 / 8192
@@ -57,4 +57,4 @@ def test_sim_backend_streams_at_fs():
     time.sleep(0.3)
     z = s.read_new()
     assert abs(z.size - 0.3 * fs) < 0.1 * fs
-    assert np.isclose(np.abs(z.mean()), 0.98 * 0.5 / 2, rtol=0.01)
+    assert np.isclose(np.abs(z.mean()), IQ_GAIN_DEFAULT * 2 * 0.98 * 0.25, rtol=0.01)

@@ -22,7 +22,8 @@ CH1_BASE, CH2_BASE = 0x10000, 0x20000
 @dataclass
 class LockinSettings:
     frequency: float = 1e6       # excitation / demodulation frequency [Hz]
-    amplitude: float = 0.5       # excitation amplitude [V]
+    amplitude: float = 0.25      # excitation amplitude [V], PyRPL value (into 50 ohm):
+                                 # a 1 MOhm input sees ~2x this -> keep <= 0.35 V on LV jumpers
     output: str = "out1"         # 'out1', 'out2' or 'off'
     input: str = "in1"           # 'in1' or 'in2'
     phase: float = 0.0           # demodulation phase [deg]
@@ -49,11 +50,14 @@ def choose_decimation(out_rate, oversample=8, min_buffer_s=0.4):
     return best
 
 
-def iq_to_volts(z, quadrature_factor):
-    """Approximate input amplitude [V pk] from raw I/Q: the IQ module multiplies the
-    input by a 1 V sine, so a pure tone A*cos gives |I+jQ| ~ A/2 * quadrature_factor.
-    Calibrate against a known loopback for exact numbers."""
-    return 2.0 * np.abs(z) / max(quadrature_factor, 1e-12)
+IQ_GAIN_DEFAULT = 0.41   # |I+jQ| per volt of input amplitude at quadrature_factor 1,
+                         # measured on STEMlab 125-14 / OS 3.00 / RedPitaya PyRPL fork
+                         # (theory for an ideal mixer: 0.5). Recalibrate with tools/pyrpl_diag.py.
+
+
+def iq_to_volts(z, quadrature_factor, iq_gain=IQ_GAIN_DEFAULT):
+    """Input amplitude [V pk] from raw I/Q: |I+jQ| = iq_gain * quadrature_factor * A."""
+    return np.abs(z) / max(iq_gain * quadrature_factor, 1e-12)
 
 
 class PyrplLockin:
@@ -78,10 +82,31 @@ class PyrplLockin:
             self.scope.stop()          # a previous session may have left it running
         except Exception:
             pass
+        for name in ("asg0", "asg1", "iq0", "iq1"):   # nothing else drives the outputs
+            try:
+                getattr(self.r, name).output_direct = "off"
+            except Exception:
+                pass
+        # PyRPL caches the filter constants (stages, shift bits, min bandwidth) on first
+        # read. Read right after the FPGA image was (re)loaded they can be wrong, which
+        # limits the low-pass list to ~1 Hz. Wait, drop the cache and read them again.
+        time.sleep(1.0)
+        self._refresh_filter_cache()
+
+    def _refresh_filter_cache(self):
+        for attr in ("bandwidth", "acbandwidth"):
+            for key in ("filterstages", "shiftbits", "minbw"):
+                self.iq.__dict__.pop(f"_{attr}_{key}", None)
+            self.iq.__dict__.pop(f"{attr}_options", None)
 
     def bandwidths(self):
         try:
-            return sorted({float(b) for b in self.iq.bandwidths if b > 0})
+            bws = sorted({float(b) for b in self.iq.bandwidths if b > 0})
+            if bws and max(bws) < 1000:        # stale cache -> try once more
+                time.sleep(1.0)
+                self._refresh_filter_cache()
+                bws = sorted({float(b) for b in self.iq.bandwidths if b > 0})
+            return bws
         except Exception:
             return [10, 30, 100, 300, 500, 1000, 3000, 10000]
 
@@ -209,7 +234,7 @@ class SimLockin:
         self._n += n
         amp_in = 0.0 if s.output == "off" else 0.98 * s.amplitude * (1 + 2e-4 * np.sin(2 * np.pi * 0.2 * t))
         phi = np.radians(30.0 - s.phase) + 2e-3 * np.sin(2 * np.pi * 0.05 * t)
-        z = s.quadrature_factor * amp_in / 2 * np.exp(1j * phi)
+        z = s.quadrature_factor * IQ_GAIN_DEFAULT * 2 * amp_in * np.exp(1j * phi)   # 2x: 1 MOhm input
         noise_sd = 2e-4 * np.sqrt(s.bandwidth / 500.0) * s.quadrature_factor
         z = z + noise_sd * (self.rng.standard_normal(n) + 1j * self.rng.standard_normal(n))
         # 14-bit quantisation and +-1 V clipping like the real scope
