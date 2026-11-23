@@ -155,12 +155,17 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.window.valueChanged.connect(self._resize_buffer)
         self.dec_label = QtWidgets.QLabel("-")
         self.dec_label.setWordWrap(True)
-        self.zoom_cluster = QtWidgets.QCheckBox("Phasor plot: zoom to point cloud")
+        self.zoom_cluster = QtWidgets.QCheckBox("Phasor: zoom to cloud")
         self.zoom_cluster.setChecked(True)
+        self.zoom_cluster.toggled.connect(self._reset_phasor_range)
+        self.follow = QtWidgets.QCheckBox("Follow newest data")
+        self.follow.setChecked(True)
+        self.follow.toggled.connect(lambda on: on and self._reset_view())
         f.addRow("Output rate", self.rate)
         f.addRow("Display window", self.window)
         f.addRow("Scope sampling", self.dec_label)
         f.addRow(self.zoom_cluster)
+        f.addRow(self.follow)
         pl.addWidget(g)
 
         # buttons
@@ -175,12 +180,15 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.btn_rot0 = QtWidgets.QPushButton("Reset rotation")
         self.btn_rot0.clicked.connect(self._reset_rotation)
         self.btn_clear = QtWidgets.QPushButton("Clear plots")
-        self.btn_clear.clicked.connect(lambda: self.buf.clear())
+        self.btn_clear.clicked.connect(self._clear_plots)
+        self.btn_view = QtWidgets.QPushButton("Reset view")
+        self.btn_view.setToolTip("Scroll with new data again and auto-scale all axes")
+        self.btn_view.clicked.connect(self._reset_view)
         self.btn_rec = QtWidgets.QPushButton("Record CSV")
         self.btn_rec.setCheckable(True)
         self.btn_rec.toggled.connect(self._toggle_record)
         for i, b in enumerate([self.btn_apply, self.btn_start, self.btn_autophase,
-                               self.btn_rot0, self.btn_clear, self.btn_rec]):
+                               self.btn_rot0, self.btn_clear, self.btn_rec, self.btn_view]):
             bl.addWidget(b, i // 2, i % 2)
         pl.addLayout(bl)
         for w in (self.btn_apply, self.btn_start, self.btn_autophase, self.btn_rot0, self.btn_rec):
@@ -209,6 +217,9 @@ class LockinWindow(QtWidgets.QMainWindow):
             p.setLabel("bottom", "time", units="s")
             p.setClipToView(True)
             p.setDownsampling(auto=True, mode="peak")
+            p.setAutoVisible(y=True)            # y auto-range uses only the visible x window
+            p.enableAutoRange(axis="y")
+            p.disableAutoRange(axis="x")        # x is driven by the Follow logic
         self.p_r.setXLink(self.p_iq)
         self.p_ph.setXLink(self.p_iq)
         self.p_sc = self.gl.addPlot(row=0, col=1, rowspan=3, title="Phasor I/Q (last 2000 points)")
@@ -223,6 +234,8 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.gl.ci.layout.setColumnStretchFactor(0, 3)
         self.gl.ci.layout.setColumnStretchFactor(1, 2)
 
+        self._sc_c = None                       # phasor view centre
+        self._sc_half = None                    # phasor view half-width
         self.status = self.statusBar()
         self.status.showMessage("Not connected")
 
@@ -307,7 +320,7 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.binner = Binner(fs, rate)
         self.dec_label.setText(f"dec {dec} -> {fs/1e3:.3f} kS/s, buffer {2**14/fs:.2f} s")
         self._resize_buffer()
-        self.buf.clear()
+        self._clear_plots()
         self.samples_in = 0
         self.t_stream0 = time.perf_counter()
         self.streaming = True
@@ -355,14 +368,10 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.c_ph.setData(t, np.degrees(np.angle(zr)))
         tail = zr[-SCATTER_POINTS:]
         self.sc.setData(tail.real, tail.imag)
-        if self.zoom_cluster.isChecked():
-            c = tail.mean()
-            half = max(6 * max(tail.real.std(), tail.imag.std()), 1e-6)
-            self.p_sc.setRange(xRange=(c.real - half, c.real + half),
-                               yRange=(c.imag - half, c.imag + half), padding=0)
-        else:
-            lim = max(np.abs(tail).max(), 1e-6) * 1.1
-            self.p_sc.setRange(xRange=(-lim, lim), yRange=(-lim, lim), padding=0)
+        self._update_phasor_range(tail)
+        if self.follow.isChecked():
+            t1 = t[-1]
+            self.p_iq.setXRange(max(t1 - self.window.value(), t[0]), t1, padding=0.01)
 
         n1 = int(self.binner.rate)                   # last 1 s
         z1 = zr[-n1:]
@@ -391,16 +400,49 @@ class LockinWindow(QtWidgets.QMainWindow):
                 self.backend.overruns,
                 f"{self.rec_rows} rows" if self.rec_writer else "off"))
 
+    def _update_phasor_range(self, tail):
+        """Change the phasor view only when needed (hysteresis), so it doesn't wobble."""
+        if self.zoom_cluster.isChecked():
+            c = complex(np.median(tail.real), np.median(tail.imag))
+            need = float(np.percentile(np.abs(tail - c), 99.5))
+            need = max(need, 1e-6)
+        else:
+            c = 0j
+            need = max(float(np.abs(tail).max()), 1e-6)
+        h = self._sc_half
+        if (h is None or need > 0.9 * h or need < 0.25 * h
+                or abs(c - self._sc_c) > 0.25 * h):
+            self._sc_c = c
+            self._sc_half = h = 2.0 * need
+            self.p_sc.setRange(xRange=(c.real - h, c.real + h),
+                               yRange=(c.imag - h, c.imag + h), padding=0)
+
+    def _reset_phasor_range(self, *args):
+        self._sc_c = self._sc_half = None
+        self._update_plots()
+
+    def _reset_view(self):
+        if not self.follow.isChecked():
+            self.follow.setChecked(True)      # re-enters here via the toggled signal
+            return
+        for p in (self.p_iq, self.p_r, self.p_ph):
+            p.enableAutoRange(axis="y")
+        self._reset_phasor_range()
+
+    def _clear_plots(self):
+        self.buf.clear()
+        self._sc_c = self._sc_half = None
+
     def _autophase(self):
         n = max(int(0.5 * (self.binner.rate if self.binner else 1000)), 1)
         if self.buf.z.size == 0:
             return
         self.rotation = float(np.angle(self.buf.z[-n:].mean()))
-        self._update_plots()
+        self._reset_phasor_range()
 
     def _reset_rotation(self):
         self.rotation = 0.0
-        self._update_plots()
+        self._reset_phasor_range()
 
     # ------------------------------------------------------------ recording
     def _toggle_record(self, on):
