@@ -10,6 +10,8 @@ as a test bench for the capacitive nanosensor's 1 MHz excitation and lock-in det
 | `scpi_tests/rp_lockin_test.py` | 1 MHz sine on OUT1, captures IN1 + IN2 bursts (16 384 samples @ 125 MS/s) over SCPI, demodulates in numpy, prints amplitude, phase, IN2/IN1 ratio and their scatter | PC (post-processing of bursts) |
 | `scpi_tests/rp_lockin_plot.py` | Same measurement, live window: raw IN1/IN2 waveforms, I/Q phasors, amplitude, phase and \|B/A\| history with running statistics. Options `--freq`, `--amp` | PC (post-processing of bursts) |
 | `pyrpl_tests/pyrpl_lockin.py` | PyRPL IQ module: 1 MHz excitation on OUT1, demodulation of IN1 with a 500 Hz low-pass, reads I/Q | FPGA (continuous, real-time) |
+| `lockin_gui/rp_lockin_gui.py` | **Lock-in GUI**: set frequency, amplitude, output/input, demod phase, low-pass, AC coupling, gain; gapless I/Q readout at 1 kHz (configurable), live plots, auto-phase, CSV recording. `--simulate` runs without a board | FPGA (PyRPL IQ) + PC binning |
+| `tests/` | Unit tests for binning and simulator (`python -m pytest tests`) | — |
 | `setup_env.ps1` | Creates the Python virtual environment and installs dependencies (Windows) | — |
 
 ## Setup (Windows PowerShell)
@@ -63,6 +65,23 @@ is higher than in a 500 Hz lock-in.
 4. Set `gui=True` for the interactive PyRPL window (iq2 tab, scope with `iq2` / `iq2_2`).
 
 I/Q are in PyRPL internal units — use the direct loopback as the reference and compare the DUT against it.
+
+## 3. Lock-in GUI (recommended)
+
+```powershell
+python lockin_gui\rp_lockin_gui.py             # hardware (close the Red Pitaya web apps first)
+python lockin_gui\rp_lockin_gui.py --simulate  # try the GUI without a board
+```
+
+Connect → set parameters → **Apply settings** → **Start**. **Auto-phase** rotates I/Q in software so the
+signal lies on +I. **Record CSV** writes `t_s, I_raw, Q_raw, I_rot, Q_rot, R_V, phase_deg, rot_deg` to `data/`.
+
+How the 1 kHz readout works: the IQ module's two quadratures go to the scope (ch1 = `iq2`, ch2 = `iq2_2`),
+which runs in rolling mode at decimation 8192 (15.26 kS/s, 1.07 s circular buffer). Every 50 ms the GUI
+reads only the newly written samples and averages them into exact 1 ms bins (15–16 samples each), so the
+stream is gapless as long as the PC keeps up (the *buffer overruns* counter must stay 0).
+
+See the full documentation for the signal chain, scaling and limitations.
 
 ## Known limitations / to verify
 
