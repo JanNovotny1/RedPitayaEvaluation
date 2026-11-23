@@ -50,9 +50,10 @@ def choose_decimation(out_rate, oversample=8, min_buffer_s=0.4):
     return best
 
 
-IQ_GAIN_DEFAULT = 0.41   # |I+jQ| per volt of input amplitude at quadrature_factor 1,
-                         # measured on STEMlab 125-14 / OS 3.00 / RedPitaya PyRPL fork
-                         # (theory for an ideal mixer: 0.5). Recalibrate with tools/pyrpl_diag.py.
+IQ_GAIN_DEFAULT = 0.5    # |I+jQ| per volt of input amplitude at quadrature_factor 1.
+                         # Measured 0.5004 on STEMlab 125-14 / OS 3.00 / RedPitaya PyRPL fork
+                         # (0.2 V excitation, no clipping) = ideal mixer value.
+                         # Recalibrate with tools/pyrpl_diag.py.
 
 
 def iq_to_volts(z, quadrature_factor, iq_gain=IQ_GAIN_DEFAULT):

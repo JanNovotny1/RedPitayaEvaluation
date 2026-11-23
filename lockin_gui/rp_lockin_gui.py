@@ -143,7 +143,7 @@ class LockinWindow(QtWidgets.QMainWindow):
         f.addRow("Quadrature factor", self.qf)
         self.iqgain = self._dspin(0.01, 10, IQ_GAIN_DEFAULT, 4, "", 0.01)
         self.iqgain.setToolTip("Calibration: |I+jQ| per volt of input amplitude at quadrature factor 1.\n"
-                               "Measured 0.41 on this board; tools/pyrpl_diag.py prints it.")
+                               "Measured 0.5004 on this board (ideal 0.5); tools/pyrpl_diag.py prints it.")
         f.addRow("IQ gain (cal.)", self.iqgain)
         pl.addWidget(g)
 
