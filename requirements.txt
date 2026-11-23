@@ -1,4 +1,6 @@
 numpy
 matplotlib
-# PyRPL development version (needed for Red Pitaya OS 3 support) with PyQt5 GUI binding
-pyrpl[qt-pyqt5] @ git+https://github.com/pyrpl-fpga/pyrpl.git
+six
+# Official Red Pitaya PyRPL fork: supports STEMlab 125-14 Gen 2 and Original Gen, OS 3.00
+# (the community pyrpl-fpga version supports Original Gen boards only)
+pyrpl @ git+https://github.com/RedPitaya/pyrpl.git

@@ -87,7 +87,10 @@ See the full documentation for the signal chain, scaling and limitations.
 
 - Scripts were written against the documented Red Pitaya SCPI command set and the PyRPL API but have
   not yet been run on this board — if a command or parameter is rejected, the error names the line.
-- PyRPL support for Red Pitaya OS 3 is new; use the GitHub development version (see `requirements.txt`).
+- PyRPL comes from Red Pitaya's official fork (github.com/RedPitaya/pyrpl), which supports Gen 2 and Original Gen
+  boards on OS 3.00. The community version (pyrpl-fpga/pyrpl) supports Original Gen only.
+- PyRPL needs SSH on the board. If `ssh root@<board>` is refused, see the documentation (missing host keys:
+  run `ssh-keygen -A` and `systemctl enable --now ssh` on the board).
 - Ratiometric IN2/IN1 with two PyRPL IQ modules needs a check that both NCOs stay phase-locked.
 - `r.sampler` reads one value per network round-trip; use the PyRPL scope for continuous I/Q records.
 
