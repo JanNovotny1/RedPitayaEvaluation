@@ -8,6 +8,7 @@ as a test bench for the capacitive nanosensor's 1 MHz excitation and lock-in det
 | Path | What it does | Where the lock-in runs |
 |---|---|---|
 | `scpi_tests/rp_lockin_test.py` | 1 MHz sine on OUT1, captures IN1 + IN2 bursts (16 384 samples @ 125 MS/s) over SCPI, demodulates in numpy, prints amplitude, phase, IN2/IN1 ratio and their scatter | PC (post-processing of bursts) |
+| `scpi_tests/rp_lockin_plot.py` | Same measurement, live window: raw IN1/IN2 waveforms, I/Q phasors, amplitude, phase and \|B/A\| history with running statistics. Options `--freq`, `--amp` | PC (post-processing of bursts) |
 | `pyrpl_tests/pyrpl_lockin.py` | PyRPL IQ module: 1 MHz excitation on OUT1, demodulation of IN1 with a 500 Hz low-pass, reads I/Q | FPGA (continuous, real-time) |
 | `setup_env.ps1` | Creates the Python virtual environment and installs dependencies (Windows) | — |
 
@@ -39,7 +40,12 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
    ```powershell
    python scpi_tests\rp_lockin_test.py rp-f109f7.local
    ```
-3. Expected with a T-piece loopback: ~0.5 V pk on both channels, |B/A| ≈ 1.000, Δphase ≈ 0°.
+3. Live plots:
+   ```powershell
+   python scpi_tests\rp_lockin_plot.py rp-f109f7.local            # add --freq 1000 --amp 0.3 etc.
+   ```
+   Close the window to stop (the generator is switched off).
+4. Expected with a T-piece loopback: ~0.5 V pk on both channels, |B/A| ≈ 1.000, Δphase ≈ 0°.
 
 Each result covers 131 carrier cycles (~131 µs → ~7.6 kHz equivalent bandwidth), so noise per reading
 is higher than in a 500 Hz lock-in.

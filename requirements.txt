@@ -1,3 +1,4 @@
 numpy
+matplotlib
 # PyRPL development version (needed for Red Pitaya OS 3 support) with PyQt5 GUI binding
 pyrpl[qt-pyqt5] @ git+https://github.com/pyrpl-fpga/pyrpl.git
