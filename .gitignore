@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# PyRPL user config / data (may contain board hostname and settings)
+pyrpl_user_dir/
+*.yml.bak
+
+# Measurement output
+data/
+*.npy
+*.csv
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
