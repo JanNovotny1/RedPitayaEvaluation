@@ -73,7 +73,9 @@ python lockin_gui\rp_lockin_gui.py             # hardware (close the Red Pitaya 
 python lockin_gui\rp_lockin_gui.py --simulate  # try the GUI without a board
 ```
 
-Connect → set parameters → **Apply settings** → **Start**. **Auto-phase** rotates I/Q in software so the
+Connect → set parameters → **Apply settings** → **Start**. **Readout** selects *Stream 14-bit* (gapless, via the
+scope buffer) or *High-res 24-bit* (full-precision filtered I/Q from the FPGA's 62-bit accumulators, one value per
+averaging time, a few ms dead time between values; calibrated automatically against the stream on switching). **Auto-phase** rotates I/Q in software so the
 signal lies on +I. **Record CSV** writes `t_s, I_raw, Q_raw, I_rot, Q_rot, R_V, phase_deg, rot_deg` to `data/`.
 
 How the 1 kHz readout works: the IQ module's two quadratures go to the scope (ch1 = `iq2`, ch2 = `iq2_2`),

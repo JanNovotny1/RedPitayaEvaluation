@@ -56,6 +56,14 @@ IQ_GAIN_DEFAULT = 0.5    # |I+jQ| per volt of input amplitude at quadrature_fact
                          # Recalibrate with tools/pyrpl_diag.py.
 
 
+HIRES_DEFAULT_SCALE = 2.0**-22   # 24-bit LSB -> stream units at qf = 1 (PyRPL's na rescale);
+                                 # the GUI replaces it by a calibration against the 14-bit stream
+
+
+def _signed(v, bits):
+    return v - (1 << bits) if v >> (bits - 1) else v
+
+
 def iq_to_volts(z, quadrature_factor, iq_gain=IQ_GAIN_DEFAULT):
     """Input amplitude [V pk] from raw I/Q: |I+jQ| = iq_gain * quadrature_factor * A."""
     return np.abs(z) / max(iq_gain * quadrature_factor, 1e-12)
@@ -182,6 +190,39 @@ class PyrplLockin:
     def stop_stream(self):
         pass
 
+    # --- high-resolution readout --------------------------------------------
+    # The IQ block sums the 24-bit low-pass-filtered quadratures (quadrature1/2, before
+    # the quadrature factor and the cut to 14 bits) in 62-bit accumulators over
+    # na_averages clock cycles (registers 0x130, 0x140-0x14C). Writing the frequency
+    # register (0x108) restarts the sum. One value per averaging time, plus the network
+    # round trip as dead time between values.
+    REG_FREQ, REG_NA_AVG, REG_NA_SLEEP, REG_NA_DATA = 0x108, 0x130, 0x134, 0x140
+
+    def start_hires(self, t_avg):
+        self.hires_n = max(int(round(t_avg * FPGA_CLOCK)), 1)
+        self.iq._write(self.REG_NA_SLEEP, 0)
+        self.iq._write(self.REG_NA_AVG, self.hires_n)
+        self._freq_word = int(self.iq._read(self.REG_FREQ))
+        self._hires_restart()
+
+    def _hires_restart(self):
+        self.iq._write(self.REG_FREQ, self._freq_word)   # same frequency: restarts the sum
+        self._hires_t0 = time.perf_counter()
+
+    def poll_hires(self):
+        """None while averaging; else (t_start, t_end, mean_raw) with mean_raw the complex
+        mean of the 24-bit quadratures in LSB units. Restarts the next average at once."""
+        if time.perf_counter() - self._hires_t0 < self.hires_n / FPGA_CLOCK:
+            return None
+        a, b, c, d = (int(v) for v in self.iq._reads(self.REG_NA_DATA, 4))
+        if (a | b | c | d) >> 31:
+            return None                                   # still averaging
+        t_start, t_end = self._hires_t0, time.perf_counter()
+        self._hires_restart()
+        i_sum = _signed((a & 0x7FFFFFFF) | ((b & 0x7FFFFFFF) << 31), 62)
+        q_sum = _signed((c & 0x7FFFFFFF) | ((d & 0x7FFFFFFF) << 31), 62)
+        return t_start, t_end, complex(i_sum, q_sum) / self.hires_n
+
     def close(self):
         try:
             self.iq.output_direct = "off"
@@ -244,6 +285,29 @@ class SimLockin:
 
     def stop_stream(self):
         pass
+
+    def _sim_z(self, t, n_avg_samples=1, quantise=True):
+        s = self.s
+        amp_in = 0.0 if s.output == "off" else 0.98 * s.amplitude * (1 + 2e-4 * np.sin(2 * np.pi * 0.2 * t))
+        phi = np.radians(30.0 - s.phase) + 2e-3 * np.sin(2 * np.pi * 0.05 * t)
+        return IQ_GAIN_DEFAULT * 2 * amp_in * np.exp(1j * phi)
+
+    def start_hires(self, t_avg):
+        self.hires_t = t_avg
+        self._hires_t0 = time.perf_counter()
+        self._sim_t0 = getattr(self, "_sim_t0", self._hires_t0)
+
+    def poll_hires(self):
+        now = time.perf_counter()
+        if now - self._hires_t0 < self.hires_t + 0.002:   # + simulated network dead time
+            return None
+        t_start = self._hires_t0
+        self._hires_t0 = now
+        z = self._sim_z(t_start - self._sim_t0)
+        noise_sd = 2e-4 * np.sqrt(1e-3 / max(self.hires_t, 1e-6))   # white noise averages down
+        z = z + noise_sd * (self.rng.standard_normal() + 1j * self.rng.standard_normal())
+        # raw 24-bit LSB units, same convention as the hardware (qf not applied)
+        return t_start, now, z / HIRES_DEFAULT_SCALE
 
     def close(self):
         pass

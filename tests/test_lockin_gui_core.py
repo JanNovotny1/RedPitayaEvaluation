@@ -58,3 +58,26 @@ def test_sim_backend_streams_at_fs():
     z = s.read_new()
     assert abs(z.size - 0.3 * fs) < 0.1 * fs
     assert np.isclose(np.abs(z.mean()), IQ_GAIN_DEFAULT * 2 * 0.98 * 0.25, rtol=0.01)
+
+
+def test_signed_62bit_decoding():
+    from backends import _signed
+    assert _signed(5, 62) == 5
+    assert _signed((1 << 62) - 1, 62) == -1
+    v = -123456789012
+    assert _signed(v & ((1 << 62) - 1), 62) == v
+
+
+def test_sim_hires_returns_raw_units():
+    import time
+    from backends import HIRES_DEFAULT_SCALE, IQ_GAIN_DEFAULT
+    s = SimLockin()
+    s.connect()
+    s.start_hires(1e-3)
+    res = None
+    t0 = time.time()
+    while res is None and time.time() - t0 < 1:
+        res = s.poll_hires()
+    assert res is not None
+    z = res[2] * HIRES_DEFAULT_SCALE
+    assert np.isclose(abs(z), IQ_GAIN_DEFAULT * 2 * 0.98 * 0.25, rtol=0.02)

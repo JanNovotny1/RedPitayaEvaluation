@@ -31,8 +31,8 @@ APP = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 
 import pyqtgraph as pg  # noqa: E402
 
-from backends import (IQ_GAIN_DEFAULT, LockinSettings, PyrplLockin,  # noqa: E402
-                      SimLockin, choose_decimation, iq_to_volts)
+from backends import (HIRES_DEFAULT_SCALE, IQ_GAIN_DEFAULT, LockinSettings,  # noqa: E402
+                      PyrplLockin, SimLockin, choose_decimation, iq_to_volts)
 from binning import Binner  # noqa: E402
 
 POLL_MS = 50
@@ -74,6 +74,12 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.samples_in = 0
         self.t_stream0 = None
         self.buf = RingBuffer(10 * 1000)
+        self.hires = False                  # readout mode
+        self.hires_scale = None             # complex factor raw-24-bit -> stream units at qf=1
+        self.hires_scale_src = "default"
+        self.hires_conj = False
+        self.n_points = 0
+        self.dead_time = 0.0
 
         self._build_ui(args)
         self.timer = QtCore.QTimer(self)
@@ -164,6 +170,17 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.follow = QtWidgets.QCheckBox("Follow newest data")
         self.follow.setChecked(True)
         self.follow.toggled.connect(lambda on: on and self._reset_view())
+        self.mode = QtWidgets.QComboBox()
+        self.mode.addItems(["Stream 14-bit (gapless)", "High-res 24-bit (gaps)"])
+        self.mode.setToolTip("Stream: 14-bit I/Q through the scope buffer, gapless at the output rate.\n"
+                             "High-res: full-precision 24-bit filtered I/Q from the FPGA's 62-bit\n"
+                             "accumulators, one value per averaging time, a few ms dead time between values.")
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+        self.t_avg = self._dspin(0.01, 10000, 1.0, 2, " ms", 1)
+        self.t_avg.setToolTip("High-res mode: averaging time per value")
+        self.t_avg.setEnabled(False)
+        f.addRow("Readout", self.mode)
+        f.addRow("Averaging time", self.t_avg)
         f.addRow("Output rate", self.rate)
         f.addRow("Display window", self.window)
         f.addRow("Scope sampling", self.dec_label)
@@ -304,7 +321,8 @@ class LockinWindow(QtWidgets.QMainWindow):
             "Applied: f = {:.3f} Hz, amp = {:.4f} V, phase = {:.3f} deg, LPF = {} Hz, AC = {:g} Hz, qf = {:g}".format(
                 act["frequency"], act["amplitude"], act["phase"], act["bandwidth"],
                 act["acbandwidth"], act["quadrature_factor"]))
-        if self.streaming and self.binner and abs(self.binner.rate - self.rate.value()) > 1e-9:
+        if self.streaming and ((self.binner and abs(self.binner.rate - self.rate.value()) > 1e-9)
+                               or self.hires):     # high-res: new averaging time / settings
             self._stop_stream()
             self._start_stream()
 
@@ -316,18 +334,30 @@ class LockinWindow(QtWidgets.QMainWindow):
             self._start_stream()
 
     def _start_stream(self):
-        rate = self.rate.value()
-        dec = choose_decimation(rate)
-        fs = self.backend.start_stream(dec)
-        self.binner = Binner(fs, rate)
-        self.dec_label.setText(f"dec {dec} -> {fs/1e3:.3f} kS/s, buffer {2**14/fs:.2f} s")
         self._resize_buffer()
-        self._clear_plots()
         self.samples_in = 0
+        self.n_points = 0
+        self.dead_time = 0.0
         self.t_stream0 = time.perf_counter()
+        was_hires = self.hires
+        self.hires = self.mode.currentIndex() == 1
+        if self.hires:
+            self._prepare_hires_scale(from_stream=not was_hires)
+            self.backend.start_hires(self.t_avg.value() * 1e-3)
+            self.binner = None
+            self.dec_label.setText(f"high-res: {self.t_avg.value():g} ms per value (24-bit)")
+            interval = 1
+        else:
+            rate = self.rate.value()
+            dec = choose_decimation(rate)
+            fs = self.backend.start_stream(dec)
+            self.binner = Binner(fs, rate)
+            self.dec_label.setText(f"dec {dec} -> {fs/1e3:.3f} kS/s, buffer {2**14/fs:.2f} s")
+            interval = POLL_MS
+        self._clear_plots()
         self.streaming = True
         self.btn_start.setText("Stop")
-        self.timer.start(POLL_MS)
+        self.timer.start(interval)
 
     def _stop_stream(self):
         self.timer.stop()
@@ -336,9 +366,13 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.btn_start.setText("Start")
 
     def _resize_buffer(self):
-        self.buf.resize(self.window.value() * self.rate.value())
+        rate = 1e3 / self.t_avg.value() if self.mode.currentIndex() == 1 else self.rate.value()
+        self.buf.resize(max(self.window.value() * rate, 10))
 
     def _poll(self):
+        if self.hires:
+            self._poll_hires()
+            return
         try:
             raw = self.backend.read_new()
         except Exception as e:
@@ -347,11 +381,86 @@ class LockinWindow(QtWidgets.QMainWindow):
             return
         self.samples_in += raw.size
         t, z = self.binner.push(raw)
+        self.n_points += t.size
         if t.size:
             self.buf.extend(t, z)
             if self.rec_writer is not None:
                 self._write_rows(t, z)
         self._update_plots()
+
+    def _poll_hires(self):
+        try:
+            res = self.backend.poll_hires()
+        except Exception as e:
+            self._stop_stream()
+            self.status.showMessage(f"Read error: {e}")
+            return
+        if res is None:
+            return
+        t_start, t_end, raw = res
+        if self.hires_conj:
+            raw = raw.conjugate()
+        if self.hires_scale is None:            # first value: calibrate against the stream
+            self._calibrate_hires(raw)
+            if self.hires_conj:
+                raw = raw.conjugate()
+        z = raw * self.hires_scale * self.qf.value()
+        t_avg = self.t_avg.value() * 1e-3
+        t = np.array([t_start - self.t_stream0 + t_avg / 2])
+        if self.n_points:
+            self.dead_time += max(t_end - t_start - t_avg, 0.0)
+        self.n_points += 1
+        zz = np.array([z])
+        self.buf.extend(t, zz)
+        if self.rec_writer is not None:
+            self._write_rows(t, zz)
+        now = time.perf_counter()
+        if now - getattr(self, "_last_draw", 0) > 0.05:   # redraw at most 20x per second
+            self._last_draw = now
+            self._update_plots()
+
+    def _prepare_hires_scale(self, from_stream):
+        """Remember the last second of 14-bit stream data (stream units) for calibration.
+        Keeps an existing calibration when restarting high-res mode."""
+        if not from_stream and self.hires_scale is not None:
+            return
+        self._cal_ref = None
+        if self.buf.z.size and from_stream:
+            sel = self.buf.t >= self.buf.t[-1] - 1.0
+            self._cal_ref = (self.buf.z[sel].mean(), self.qf.value())
+        self.hires_scale = None
+        self.hires_conj = False
+
+    def _calibrate_hires(self, raw):
+        ref = getattr(self, "_cal_ref", None)
+        self.hires_scale, self.hires_scale_src = HIRES_DEFAULT_SCALE, "default (PyRPL)"
+        if ref is None or abs(ref[0]) < 1e-3 or abs(raw) == 0:
+            return
+        zs, qf = ref
+        best = None
+        for conj in (False, True):
+            r = (zs / qf) / (raw.conjugate() if conj else raw)
+            err = min(abs(np.angle(r)), abs(abs(np.angle(r)) - np.pi))
+            if best is None or err < best[0]:
+                best = (err, conj, r)
+        err, conj, r = best
+        if np.degrees(err) > 5:          # stream and accumulator disagree in phase: keep default
+            self.hires_scale_src = f"default (cal. failed, {np.degrees(err):.1f} deg)"
+            return
+        scale = abs(r) * (1 if abs(np.angle(r)) < np.pi / 2 else -1)
+        p2 = 2.0 ** np.round(np.log2(abs(scale)))
+        if abs(abs(scale) / p2 - 1) < 0.03:          # snap to the nearest power of two
+            scale = np.sign(scale) * p2
+        self.hires_conj = conj
+        self.hires_scale = scale
+        self.hires_scale_src = f"cal. vs stream ({abs(scale) / HIRES_DEFAULT_SCALE:.4g} x default)"
+
+    def _mode_changed(self, idx):
+        self.t_avg.setEnabled(idx == 1)
+        self.rate.setEnabled(idx == 0)
+        if self.streaming:
+            self._stop_stream()
+            self._start_stream()
 
     # ------------------------------------------------------------ display
     def _rotated(self, z):
@@ -382,13 +491,25 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.sc.setData(tail.real, tail.imag)
         self._update_phasor_range(tail)
 
-        n1 = int(self.binner.rate)                   # last 1 s
-        z1 = zr[-n1:]
+        sel1 = t >= t[-1] - 1.0                      # last 1 s
+        z1 = zr[sel1]
         r = iq_to_volts(z1, qf, k)
         ph = np.degrees(np.angle(z1))
         elapsed = time.perf_counter() - self.t_stream0
-        raw_max = max(np.abs(self.buf.z[-n1:].real).max(), np.abs(self.buf.z[-n1:].imag).max())
-        warn = "  << NEAR FULL SCALE, lower qf" if raw_max > 0.9 else ""
+        zb = self.buf.z[sel1]
+        raw_max = max(np.abs(zb.real).max(), np.abs(zb.imag).max())
+        warn = "  << NEAR FULL SCALE, lower qf" if (raw_max > 0.9 and not self.hires) else ""
+        if self.hires:
+            rate = self.n_points / max(elapsed, 1e-9)
+            dead = self.dead_time / max(self.n_points - 1, 1) * 1e3
+            mode_txt = ("mode            = high-res 24-bit\n"
+                        f"values/s        = {rate:.1f}\n"
+                        f"dead time/value = {dead:.2f} ms\n"
+                        f"scale           = {self.hires_scale_src}")
+        else:
+            mode_txt = ("mode            = stream 14-bit\n"
+                        f"scope samples/s = {self.samples_in / max(elapsed, 1e-9):.0f}\n"
+                        f"buffer overruns = {self.backend.overruns}")
         self.stats.setText(
             "Last 1 s ({} pts)\n"
             "I     = {:+.6f}  sd {:.2e}\n"
@@ -398,15 +519,13 @@ class LockinWindow(QtWidgets.QMainWindow):
             "phase = {:+.4f} deg  sd {:.2f} mdeg\n"
             "rotation (SW) = {:+.3f} deg\n"
             "max |I|,|Q| raw = {:.3f}{}\n\n"
-            "scope samples/s = {:.0f}\n"
+            "{}\n"
             "output points   = {}\n"
-            "buffer overruns = {}\n"
             "recording       = {}".format(
                 z1.size, z1.real.mean(), z1.real.std(), z1.imag.mean(), z1.imag.std(),
                 r.mean(), r.mean() / np.sqrt(2), r.std(), r.std() / max(r.mean(), 1e-15) * 1e6,
                 ph.mean(), ph.std() * 1e3, np.degrees(self.rotation), raw_max, warn,
-                self.samples_in / max(elapsed, 1e-9), int(self.binner.n * self.binner.rate / self.binner.fs),
-                self.backend.overruns,
+                mode_txt, self.n_points,
                 f"{self.rec_rows} rows" if self.rec_writer else "off"))
 
     @staticmethod
@@ -458,10 +577,10 @@ class LockinWindow(QtWidgets.QMainWindow):
         self._sc_c = self._sc_half = None
 
     def _autophase(self):
-        n = max(int(0.5 * (self.binner.rate if self.binner else 1000)), 1)
         if self.buf.z.size == 0:
             return
-        self.rotation = float(np.angle(self.buf.z[-n:].mean()))
+        sel = self.buf.t >= self.buf.t[-1] - 0.5
+        self.rotation = float(np.angle(self.buf.z[sel].mean()))
         self._reset_phasor_range()
 
     def _reset_rotation(self):
@@ -484,6 +603,9 @@ class LockinWindow(QtWidgets.QMainWindow):
             self.rec_file.write(f"# backend: {self.backend.name}\n")
             self.rec_file.write(f"# settings: {s}\n")
             self.rec_file.write(f"# actual: {getattr(self, 'actual', {})}\n")
+            self.rec_file.write(f"# readout: {self.mode.currentText()}"
+                                + (f", averaging {self.t_avg.value()} ms, scale {self.hires_scale_src}" if self.hires else "")
+                                + "\n")
             self.rec_file.write(f"# output rate: {self.rate.value()} Hz; software rotation at start: "
                                 f"{np.degrees(self.rotation):.4f} deg\n")
             self.rec_file.write("# I_raw/Q_raw: IQ module units; I_rot/Q_rot: after software rotation; "
