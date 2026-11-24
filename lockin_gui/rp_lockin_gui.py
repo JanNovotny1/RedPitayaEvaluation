@@ -94,10 +94,14 @@ class LockinWindow(QtWidgets.QMainWindow):
 
         # left side: scrollable settings on top, statistics always visible below
         left = QtWidgets.QWidget()
-        left.setFixedWidth(390)
+        left.setMinimumWidth(300)
         ll = QtWidgets.QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(left)
+        # left panel and plots side by side with a draggable divider
+        self._hsplit = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self._hsplit.setChildrenCollapsible(False)
+        self._hsplit.addWidget(left)
+        lay.addWidget(self._hsplit)
         panel = QtWidgets.QWidget()
         pl = QtWidgets.QVBoxLayout(panel)
         scroll = QtWidgets.QScrollArea()
@@ -262,7 +266,9 @@ class LockinWindow(QtWidgets.QMainWindow):
         # plots
         pg.setConfigOptions(antialias=False)
         self.gl = pg.GraphicsLayoutWidget()
-        lay.addWidget(self.gl, 1)
+        self._hsplit.addWidget(self.gl)
+        self._hsplit.setStretchFactor(0, 0)
+        self._hsplit.setStretchFactor(1, 1)
         self.p_iq = self.gl.addPlot(row=0, col=0, title="I and Q")
         self.p_iq.addLegend(offset=(10, 5))
         self.c_i = self.p_iq.plot(pen=pg.mkPen("#1f77b4", width=1), name="I")
@@ -297,6 +303,11 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.status.showMessage("Not connected")
 
     def _size_split(self):
+        fm = self.stats.fontMetrics()
+        left_w = max(fm.horizontalAdvance("R     = 0.508214 V pk  (0.359456 V rms)") + 60, 420)
+        tot_w = sum(self._hsplit.sizes())
+        left_w = min(left_w, int(0.45 * tot_w)) if tot_w > 0 else left_w
+        self._hsplit.setSizes([left_w, max(tot_w - left_w, 400)])
         total = sum(self._split.sizes())
         h = min(self._stats_h, int(0.5 * total))
         self._split.setSizes([max(total - h, 100), h])
