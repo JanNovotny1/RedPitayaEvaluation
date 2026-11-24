@@ -53,3 +53,18 @@ class Binner:
 
     def reset(self):
         self.__init__(self.fs, self.rate)
+
+
+class RawPass:
+    """No PC filtering: passes every scope sample through with its exact timestamp n / fs."""
+
+    def __init__(self, fs):
+        self.fs = float(fs)
+        self.rate = self.fs
+        self.n = 0
+
+    def push(self, z):
+        z = np.asarray(z, dtype=complex)
+        t = (self.n + np.arange(z.size)) / self.fs
+        self.n += z.size
+        return t, z

@@ -33,7 +33,8 @@ import pyqtgraph as pg  # noqa: E402
 
 from backends import (HIRES_DEFAULT_SCALE, IQ_GAIN_DEFAULT, LockinSettings,  # noqa: E402
                       PyrplLockin, SimLockin, choose_decimation, iq_to_volts)
-from binning import Binner  # noqa: E402
+from binning import Binner, RawPass  # noqa: E402
+from firfilter import FirResampler  # noqa: E402
 
 POLL_MS = 50
 SCATTER_POINTS = 2000
@@ -135,9 +136,10 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.phase = self._dspin(-360, 360, 0, 3, " deg", 1)
         self.bw = QtWidgets.QComboBox()
         self.order = QtWidgets.QComboBox()
-        self.order.addItems(["1", "2"])
+        self.order.addItems(["1", "2", "3", "4"])
+        self.order.setToolTip("Number of first-order low-pass stages in the FPGA (each 20 dB/decade)")
         self.order.setCurrentText("2")
-        self.acbw = self._dspin(0, 1e6, 10e3, 1, " Hz", 1000)
+        self.acbw = self._dspin(0, 1e6, 2429, 1, " Hz", 100)
         self.qf = self._dspin(1, 1000, 1, 2, "", 1)
         self.qf.setToolTip("Digital gain on I/Q before readout. Raise it for small signals,\n"
                            "but keep |I|,|Q| below ~0.9 (readout full scale is 1).")
@@ -179,9 +181,22 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.t_avg = self._dspin(0.01, 10000, 1.0, 2, " ms", 1)
         self.t_avg.setToolTip("High-res mode: averaging time per value")
         self.t_avg.setEnabled(False)
+        self.pcfilt = QtWidgets.QComboBox()
+        self.pcfilt.addItems(["FIR (flat passband)", "Boxcar (average per point)", "None (raw scope samples)"])
+        self.pcfilt.setToolTip("Stream mode: filter applied on the PC before reducing 15.26 kS/s to the output rate.\n"
+                               "FIR: Kaiser-windowed, flat to 'FIR pass', >= 80 dB from 'FIR stop', zero phase.\n"
+                               "Boxcar: plain average of the samples in each output interval.\n"
+                               "None: every scope sample (15.26 kS/s at output rate 1 kHz), unfiltered on the PC.")
+        self.fir_pass = self._dspin(1, 5000, 300, 1, " Hz", 10)
+        self.fir_stop = self._dspin(2, 5000, 500, 1, " Hz", 10)
+        self.fir_stop.setToolTip("Must be <= output rate / 2 (no aliasing into the output)")
+        self.pcfilt.currentIndexChanged.connect(self._pcfilt_changed)
         f.addRow("Readout", self.mode)
         f.addRow("Averaging time", self.t_avg)
         f.addRow("Output rate", self.rate)
+        f.addRow("PC filter", self.pcfilt)
+        f.addRow("FIR pass", self.fir_pass)
+        f.addRow("FIR stop", self.fir_stop)
         f.addRow("Display window", self.window)
         f.addRow("Scope sampling", self.dec_label)
         f.addRow("Amplitude units", self.units)
@@ -274,7 +289,7 @@ class LockinWindow(QtWidgets.QMainWindow):
         return LockinSettings(
             frequency=self.freq.value(), amplitude=self.amp.value(),
             output=self.out.currentText(), input=self.inp.currentText(),
-            phase=self.phase.value(), bandwidth=float(self.bw.currentText()),
+            phase=self.phase.value(), bandwidth=float(self.bw.currentText().split()[0]),
             filter_order=int(self.order.currentText()), acbandwidth=self.acbw.value(),
             quadrature_factor=self.qf.value())
 
@@ -298,8 +313,8 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.password.clear()
         self.bw.clear()
         bws = self.backend.bandwidths()
-        self.bw.addItems([f"{b:g}" for b in bws])
-        target = min(bws, key=lambda b: abs(b - 500))
+        self.bw.addItems(["0 (off)"] + [f"{b:g}" for b in bws])
+        target = min(bws, key=lambda b: abs(b - 2429))   # wide pre-filter; the PC FIR shapes the band
         self.bw.setCurrentText(f"{target:g}")
         for w in (self.btn_apply, self.btn_start, self.btn_autophase, self.btn_rot0, self.btn_rec):
             w.setEnabled(True)
@@ -321,8 +336,7 @@ class LockinWindow(QtWidgets.QMainWindow):
             "Applied: f = {:.3f} Hz, amp = {:.4f} V, phase = {:.3f} deg, LPF = {} Hz, AC = {:g} Hz, qf = {:g}".format(
                 act["frequency"], act["amplitude"], act["phase"], act["bandwidth"],
                 act["acbandwidth"], act["quadrature_factor"]))
-        if self.streaming and ((self.binner and abs(self.binner.rate - self.rate.value()) > 1e-9)
-                               or self.hires):     # high-res: new averaging time / settings
+        if self.streaming and (self.hires or getattr(self, "_stream_cfg", None) != self._stream_config()):
             self._stop_stream()
             self._start_stream()
 
@@ -351,8 +365,28 @@ class LockinWindow(QtWidgets.QMainWindow):
             rate = self.rate.value()
             dec = choose_decimation(rate)
             fs = self.backend.start_stream(dec)
-            self.binner = Binner(fs, rate)
-            self.dec_label.setText(f"dec {dec} -> {fs/1e3:.3f} kS/s, buffer {2**14/fs:.2f} s")
+            info = f"dec {dec} -> {fs/1e3:.3f} kS/s, buffer {2**14/fs:.2f} s"
+            self.filter_desc = "boxcar"
+            if self.pcfilt.currentIndex() == 0:
+                f_stop = min(self.fir_stop.value(), rate / 2)
+                f_pass = min(self.fir_pass.value(), 0.9 * f_stop)
+                if (f_stop, f_pass) != (self.fir_stop.value(), self.fir_pass.value()):
+                    self.fir_stop.setValue(f_stop)
+                    self.fir_pass.setValue(f_pass)
+                    self.status.showMessage(f"FIR edges limited to the output Nyquist ({rate/2:g} Hz)")
+                self.binner = FirResampler(fs, rate, f_pass, f_stop, 80.0)
+                self.filter_desc = (f"FIR pass {f_pass:g} Hz, stop {f_stop:g} Hz (80 dB), "
+                                    f"{self.binner.n_taps} taps, latency {self.binner.latency_s*1e3:.1f} ms")
+                info += f"; FIR {self.binner.n_taps} taps, {self.binner.latency_s*1e3:.1f} ms delay"
+            elif self.pcfilt.currentIndex() == 2:
+                self.binner = RawPass(fs)
+                self.filter_desc = f"none (raw scope samples at {fs:.3f} S/s)"
+                info += "; raw samples, no PC filter"
+                self.buf.resize(max(self.window.value() * fs, 10))
+            else:
+                self.binner = Binner(fs, rate)
+            self._stream_cfg = self._stream_config()
+            self.dec_label.setText(info)
             interval = POLL_MS
         self._clear_plots()
         self.streaming = True
@@ -366,7 +400,12 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.btn_start.setText("Start")
 
     def _resize_buffer(self):
-        rate = 1e3 / self.t_avg.value() if self.mode.currentIndex() == 1 else self.rate.value()
+        if self.mode.currentIndex() == 1:
+            rate = 1e3 / self.t_avg.value()
+        elif isinstance(self.binner, RawPass):
+            rate = self.binner.fs
+        else:
+            rate = self.rate.value()
         self.buf.resize(max(self.window.value() * rate, 10))
 
     def _poll(self):
@@ -455,7 +494,16 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.hires_scale = scale
         self.hires_scale_src = f"cal. vs stream ({abs(scale) / HIRES_DEFAULT_SCALE:.4g} x default)"
 
+    def _stream_config(self):
+        return (self.rate.value(), self.pcfilt.currentIndex(), self.fir_pass.value(), self.fir_stop.value())
+
+    def _pcfilt_changed(self, idx):
+        self.fir_pass.setEnabled(idx == 0 and self.mode.currentIndex() == 0)
+        self.fir_stop.setEnabled(idx == 0 and self.mode.currentIndex() == 0)
+
     def _mode_changed(self, idx):
+        self.pcfilt.setEnabled(idx == 0)
+        self._pcfilt_changed(self.pcfilt.currentIndex())
         self.t_avg.setEnabled(idx == 1)
         self.rate.setEnabled(idx == 0)
         if self.streaming:
@@ -508,6 +556,7 @@ class LockinWindow(QtWidgets.QMainWindow):
                         f"scale           = {self.hires_scale_src}")
         else:
             mode_txt = ("mode            = stream 14-bit\n"
+                        f"PC filter       = {['FIR', 'boxcar', 'none (raw)'][self.pcfilt.currentIndex()]}\n"
                         f"scope samples/s = {self.samples_in / max(elapsed, 1e-9):.0f}\n"
                         f"buffer overruns = {self.backend.overruns}")
         self.stats.setText(
@@ -604,7 +653,8 @@ class LockinWindow(QtWidgets.QMainWindow):
             self.rec_file.write(f"# settings: {s}\n")
             self.rec_file.write(f"# actual: {getattr(self, 'actual', {})}\n")
             self.rec_file.write(f"# readout: {self.mode.currentText()}"
-                                + (f", averaging {self.t_avg.value()} ms, scale {self.hires_scale_src}" if self.hires else "")
+                                + (f", averaging {self.t_avg.value()} ms, scale {self.hires_scale_src}" if self.hires
+                                   else f", PC filter {getattr(self, 'filter_desc', '?')}")
                                 + "\n")
             self.rec_file.write(f"# output rate: {self.rate.value()} Hz; software rotation at start: "
                                 f"{np.degrees(self.rotation):.4f} deg\n")

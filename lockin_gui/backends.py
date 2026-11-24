@@ -27,9 +27,9 @@ class LockinSettings:
     output: str = "out1"         # 'out1', 'out2' or 'off'
     input: str = "in1"           # 'in1' or 'in2'
     phase: float = 0.0           # demodulation phase [deg]
-    bandwidth: float = 500.0     # I/Q low-pass corner [Hz] (rounded to a valid value)
-    filter_order: int = 2        # 1 or 2 low-pass stages
-    acbandwidth: float = 10e3    # input AC-coupling high-pass [Hz], 0 = DC coupled
+    bandwidth: float = 2429.0    # I/Q low-pass corner [Hz] (rounded to a valid value)
+    filter_order: int = 2        # 1..4 first-order low-pass stages
+    acbandwidth: float = 2429.0  # input AC-coupling high-pass [Hz], 0 = DC coupled
     quadrature_factor: float = 1.0  # digital gain on I/Q before readout
 
 

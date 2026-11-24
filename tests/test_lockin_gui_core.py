@@ -81,3 +81,35 @@ def test_sim_hires_returns_raw_units():
     assert res is not None
     z = res[2] * HIRES_DEFAULT_SCALE
     assert np.isclose(abs(z), IQ_GAIN_DEFAULT * 2 * 0.98 * 0.25, rtol=0.02)
+
+
+def test_fir_resampler_flat_passband_and_stopband():
+    from firfilter import FirResampler
+    f = FirResampler(FS_1K, 1000, 300, 500, 80)
+    r = 20 * np.log10(f.response([0, 100, 300, 500, 600, 2000]))
+    assert np.all(np.abs(r[:3]) < 0.01)          # flat to 300 Hz
+    assert np.all(r[3:] < -75)                    # >= 75 dB from 500 Hz
+
+
+def test_fir_resampler_grid_dc_and_chunking():
+    from firfilter import FirResampler
+    n = int(FS_1K * 2)
+    x = 0.3 * np.exp(2j * np.pi * 100 * np.arange(n) / FS_1K) + 0.1
+    out = []
+    for chunks in (137, 11):
+        f = FirResampler(FS_1K, 1000, 300, 500, 80)
+        res = [f.push(c) for c in np.array_split(x, chunks)]
+        out.append((np.concatenate([a for a, _ in res]), np.concatenate([b for _, b in res])))
+    (t1, y1), (t2, y2) = out
+    m = min(len(y1), len(y2))
+    assert np.allclose(np.diff(t1), 1e-3) and np.allclose(y1[:m], y2[:m])
+    sel = (t1 > 0.1) & (t1 < 1.8)
+    assert np.allclose(np.abs(y1[sel] - 0.1), 0.3, rtol=1e-4)   # 100 Hz passes unchanged
+
+
+def test_rawpass_keeps_every_sample():
+    from binning import RawPass
+    r = RawPass(FS_1K)
+    t, z = r.push(np.arange(10) + 0j)
+    t2, z2 = r.push(np.arange(5) + 0j)
+    assert z.size == 10 and z2.size == 5 and np.isclose(t2[0], 10 / FS_1K)

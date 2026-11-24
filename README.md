@@ -75,7 +75,10 @@ python lockin_gui\rp_lockin_gui.py --simulate  # try the GUI without a board
 
 Connect → set parameters → **Apply settings** → **Start**. **Readout** selects *Stream 14-bit* (gapless, via the
 scope buffer) or *High-res 24-bit* (full-precision filtered I/Q from the FPGA's 62-bit accumulators, one value per
-averaging time, a few ms dead time between values; calibrated automatically against the stream on switching). **Auto-phase** rotates I/Q in software so the
+averaging time, a few ms dead time between values; calibrated automatically against the stream on switching).
+**PC filter** (stream mode): *FIR* (default; flat to 300 Hz, ≥ 80 dB from 500 Hz, zero phase, exact 1 kHz grid),
+*Boxcar* (plain average per output point) or *None* (every raw scope sample at 15.26 kS/s, no PC filtering).
+The FPGA low-pass has 1–4 stages and can be switched off (`0 (off)`); default 2 × 2429 Hz as a wide pre-filter. **Auto-phase** rotates I/Q in software so the
 signal lies on +I. **Record CSV** writes `t_s, I_raw, Q_raw, I_rot, Q_rot, R_V, phase_deg, rot_deg` to `data/`.
 
 How the 1 kHz readout works: the IQ module's two quadratures go to the scope (ch1 = `iq2`, ch2 = `iq2_2`),
