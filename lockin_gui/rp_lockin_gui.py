@@ -92,10 +92,23 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
         lay = QtWidgets.QHBoxLayout(central)
 
+        # left side: scrollable settings on top, statistics always visible below
+        left = QtWidgets.QWidget()
+        left.setFixedWidth(390)
+        ll = QtWidgets.QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(left)
         panel = QtWidgets.QWidget()
-        panel.setFixedWidth(340)
         pl = QtWidgets.QVBoxLayout(panel)
-        lay.addWidget(panel)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidget(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        split.setChildrenCollapsible(False)
+        split.addWidget(scroll)
+        ll.addWidget(split, 1)
 
         # connection
         g = QtWidgets.QGroupBox("Connection")
@@ -233,7 +246,17 @@ class LockinWindow(QtWidgets.QMainWindow):
         self.stats = QtWidgets.QLabel("")
         self.stats.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
         self.stats.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        pl.addWidget(self.stats)
+        self.stats.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
+        self.stats.setMinimumHeight(self.stats.fontMetrics().lineSpacing() * 6)
+        stats_box = QtWidgets.QGroupBox("Statistics")
+        sbl = QtWidgets.QVBoxLayout(stats_box)
+        sbl.addWidget(self.stats)
+        split.addWidget(stats_box)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 0)
+        self._split = split
+        self._stats_h = self.stats.fontMetrics().lineSpacing() * 17 + 40
+        QtCore.QTimer.singleShot(0, self._size_split)
         pl.addStretch(1)
 
         # plots
@@ -272,6 +295,11 @@ class LockinWindow(QtWidgets.QMainWindow):
         self._sc_half = None                    # phasor view half-width
         self.status = self.statusBar()
         self.status.showMessage("Not connected")
+
+    def _size_split(self):
+        total = sum(self._split.sizes())
+        h = min(self._stats_h, int(0.5 * total))
+        self._split.setSizes([max(total - h, 100), h])
 
     @staticmethod
     def _dspin(lo, hi, val, dec, suffix, step):
